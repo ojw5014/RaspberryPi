@@ -288,7 +288,7 @@ void CProtocol2::SendPacket(byte *buffer, int nLength)
 		
         tcflush(m_nTty, TCIFLUSH); //usleep(11000);
         
-        WaitSend(); // ttyUSB 일때는 잘 동작
+        // WaitSend(); // ttyUSB 일때는 잘 동작
         
         //PinTxDisable();
 #if 0
