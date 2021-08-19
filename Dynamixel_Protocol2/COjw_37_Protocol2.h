@@ -90,7 +90,7 @@ public:
     void    Close();
 
     // void SetParam(int nID, bool bDirReverse = false);
-    void    SetParam(int nID, bool bDirReverse = false, float fMulti = 1.0f, bool bHigh = false);
+    void    SetParam(int nID, bool bDirReverse = false, float fMulti = 1.0f, bool bSetDynamixelPro = false);
     
     void    Command_Clear();
     void    Command_Set(int nID, float fValue);
@@ -247,10 +247,10 @@ public:
     void SetParam_Dir(bool bReverse = false) { m_bDirReverse = bReverse; }
     void SetParam_Multi(float fMulti = 1.0f) { m_fMulti = fMulti; if (fMulti == 0) m_fMulti = 1.0f; }
 
-    void SetParam(bool bSetHight = false)
+    void SetParam(bool bSetDynamixelPro = false)
     {
         //printf("SetParam()");
-        if (bSetHight == true) // PH, H54(Pro) ... 
+        if (bSetDynamixelPro == true) // PH, H54(Pro) ... 
         {
             m_bModel_High = true;
             m_nSet_Torq_Address = 512;

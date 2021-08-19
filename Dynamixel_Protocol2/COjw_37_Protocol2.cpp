@@ -166,16 +166,26 @@ bool CProtocol2::Open(const char  *pcDevice, int nBaudrate)	//serial port open
 		newtio.c_cflag |= CS8;
 		newtio.c_cflag |= CLOCAL;
 		newtio.c_cflag |= CREAD;
-        newtio.c_cflag |= CSTOPB;
-		newtio.c_iflag = IGNPAR;
-		newtio.c_oflag = 0;
+        // newtio.c_cflag |= CSTOPB; // 이게 살면 Stop 비트의 수가 2개로, 죽으면 1개로 세팅된다.
+		// newtio.c_iflag = IGNPAR; // 패리티 에러 무시
+        newtio.c_oflag = 0;
+		// newtio.c_oflag |= NL0;
+        // newtio.c_oflag |= CR0;
+        // newtio.c_oflag |= TAB0;
+        // newtio.c_oflag |= BS0;
 		newtio.c_lflag = 0;
 		newtio.c_cc[VTIME] = 0;
 		newtio.c_cc[VMIN]  = 0;
 
 
-		tcflush (m_nTty, TCIOFLUSH );			//reset modem
+		tcflush (m_nTty, TCIFLUSH );			//reset modem
+		// tcflush (m_nTty, TCOFLUSH );			//reset modem
 		tcsetattr(m_nTty, TCSANOW, &newtio );	//save setting
+        /*
+        TCSANOW : 속성을 바로 변경한다.
+        TCSADRAIN : 송신을 완료한 후 변경한다.
+        TCSAFLUSH : 송수신 완료 후 변경한다.
+        */
 	}
 	if (IsOpen() == false)
 	{
@@ -195,12 +205,12 @@ void CProtocol2::Close()								//serial port close
 	m_nTty = 0;
 }
 
-//void CProtocol2::SetParam(int nID, bool bDirReverse = false, float fMulti = 1.0f, bool bHigh = false)
+//void CProtocol2::SetParam(int nID, bool bDirReverse = false, float fMulti = 1.0f, bool bSetDynamixelPro = false)
 //void CProtocol2::SetParam(int nID, bool bDirReverse)
-void CProtocol2::SetParam(int nID, bool bDirReverse, float fMulti, bool bHigh)
+void CProtocol2::SetParam(int nID, bool bDirReverse, float fMulti, bool bSetDynamixelPro)
 {
-    printf("SetParam(%d, %d, %f, %d)", nID, bDirReverse?true:false, fMulti, bHigh?true:false);
-    m_aCParam[nID].SetParam(bHigh);
+    printf("SetParam(%d, %d, %f, %d)\r\n", nID, bDirReverse?true:false, fMulti, bSetDynamixelPro?true:false);
+    m_aCParam[nID].SetParam(bSetDynamixelPro);
     m_aCParam[nID].m_bDirReverse = bDirReverse;
     m_aCParam[nID].m_fMulti = fMulti;
 }
@@ -268,12 +278,17 @@ void CProtocol2::SendPacket(byte *buffer, int nLength)
             TxWait();
         }
 #else
+        // printf("SendPacket()\r\n");
 	    write(m_nTty, buffer, sizeof(byte) * (nLength));// + 2));
         // usleep(11000); // 57600
 #endif
-		tcflush(m_nTty, TCOFLUSH); //usleep(11000);
+		// TCIFLUSH : 수신되었으나 읽지 않는 데이터를 버린다.
+        // TCOFLUSH : 쓰여졌으나 송신되지 않은 데이터를 버린다.
+        // TCIOFLUSH : 처리되지 않은 송신/수신 데이터를 버린다.
+		
+        tcflush(m_nTty, TCIFLUSH); //usleep(11000);
         
-        //WaitSend(); // ttyUSB 일때는 잘 동작
+        WaitSend(); // ttyUSB 일때는 잘 동작
         
         //PinTxDisable();
 #if 0
@@ -359,7 +374,13 @@ int CProtocol2::MakeStuff(byte *pBuff, int nLength)
         
         int nIndex = 0;
         int nPos = 0;
-        for (int i = 5; i < nSize; i++)
+        int i = 5;   
+        
+        // 내부의 패킷길이값 재 설정 
+        pBuff[i++] = (byte)((nSize + nCnt - 7) & 0xff);
+        pBuff[i++] = (byte)(((nSize + nCnt - 7) >> 8) & 0xff);
+        
+        for (i = 7; i < nSize; i++)
         {
             pBuff[i + nPos] = pBuff2[i];
             if (i == pnIndex[nPos])
