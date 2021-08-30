@@ -3,7 +3,7 @@
  * @modified    2020.09.--
  * @version     01.00.00 Released
 
-example )   sudo g++ -o testRun test.cpp ojw_dxl.cpp ojw_dxl.h -lpthread -lwiringpi
+example )   sudo g++ -o test test.cpp COjw_37_Protocol2.cpp COjw_37_Protocol2.h -lpthread
 
  */
 #ifndef __OJW_PROTOCOL2
@@ -81,12 +81,9 @@ public:
 	CProtocol2();									// Initialize
 	~CProtocol2();		 							// Destroy
     
-    float m_afMot[256];
-	float m_afMot_Pose[256];
-
  	// void Init();
-    bool    IsOpen() { return ((m_nTty != 0) ? true : false); }
-    bool    Open(const char  *pcDevice, int nBaudrate);
+    bool    IsOpen();
+    bool    Open(const char  *pcDevice, int nBaudrate, bool bWaitSend = true);
     void    Close();
 
     // void SetParam(int nID, bool bDirReverse = false);
@@ -95,6 +92,10 @@ public:
     void    Command_Clear();
     void    Command_Set(int nID, float fValue);
     void    Command_Set_Rpm(int nID, float fRpm);
+    void    Clear() { Command_Clear(); }
+    void    Set(int nID, float fValue) { Command_Set(nID, fValue); }
+    void    Set_Rpm(int nID, float fRpm) { Command_Set_Rpm(nID, fRpm); }
+    float    Get(int nID);
 
     float   CalcEvd2Angle(int nID, int nValue);
     int     CalcAngle2Evd(int nID, float fValue);
@@ -106,9 +107,8 @@ public:
     //////////////////////////////////////////////////////
     // Protocol - basic(updateCRC, MakeStuff, SendPacket)
     //////////////////////////////////////////////////////
+    void Wait(int nTime = -1);
     void WaitSend();
-    int updateCRC(byte *data_blk_ptr, int data_blk_size);
-    int MakeStuff(byte *pBuff, int nLength);
     void SendPacket(byte *buffer, int nLength);
     //void Send(int nMotorRealID, int nCommand, int nAddress, const byte *pbyDatas, ...);
     void Send(int nMotorRealID, int nCommand, int nAddress, const byte *pbyDatas, int nDataLength);
@@ -171,8 +171,8 @@ public:
     #endif
     void SetTorq();
     
-    bool IsEms();
-    void Reset();
+    // bool IsEms();
+    // void Reset();
 
     void Wheel(float fRpm);
     // 마지막 모션이 아니라면 bContinue = false
@@ -195,10 +195,15 @@ public:
     void SetPosition();
  
     bool Play(const char *strMotionFile);
-    bool PlayFrameString(char *buff);
-    bool PlayFrameString(char *buff, bool bNoWait);
+    bool PlayFrameString(const char *buff);
+    bool PlayFrameString(const char *buff, bool bNoWait);
 
-
+    bool Open_Socket(int nPort = 0);//const char * pcIp)//, int nPort)
+    void Close_Socket();
+    bool IsOpen_Socket();
+    void Socket_BypassMode(bool bBypass);
+    bool IsSocket_BypassMode();
+    //void* Thread_Socket(void* arg);
     //
     // void SetTest(CCommand_t aCCmds, ...);
     ////////////////////////////////////////////////////// => Command

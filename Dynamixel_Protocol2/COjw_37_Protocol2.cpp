@@ -1,5 +1,5 @@
 // compile : 
-//     sudo g++ -o test0 test.cpp COjw_37_Protocol2.cpp COjw_37_Protocol2.h -lpthread -lwiringPi
+//     sudo g++ -o test test.cpp COjw_37_Protocol2.cpp COjw_37_Protocol2.h -lpthread
 // Run :
 //     sudo ./test0
 
@@ -9,7 +9,9 @@
  * @modified    2020.09.--
  * @version     01.00.00 Released
  */
- 
+
+// #define EN_WIRINGPI
+
 #include <iostream>
 #include <sys/ioctl.h> // ioctl
 
@@ -40,9 +42,59 @@
 #include <list>
 #include <algorithm> // 범위 복사에 필요
 
+#ifdef EN_WIRINGPI
+#include <wiringPi.h>
+#include <wiringSerial.h>
+#endif
+
 using namespace std;
 
+float m_afMot[256];
+float m_afMot_Pose[256];
+int m_nWait_Time = 0;
+bool m_bEms = false; // emergency switch
+bool m_bProgEnd = false;
+bool IsEms() { return (((m_bEms == true) || (m_bProgEnd == true)) ? true : false); }
+void Reset() { m_bEms = false; }
+bool is_open();
+void wait_send();
+bool play_frame_string(const char *buff, bool bNoWait);
+void command_clear();
+void command_set(int nID, float fValue);
+void command_set_rpm(int nID, float fRpm);
+float calc_evd2angle(int nID, int nValue);
+int calc_angle2evd(int nID, float fValue);
+int calc_position_time(int nAxis, int nTime, int nDelay, float fAngle);
+float calc_raw2rpm(int nID, int nValue);
+int calc_rpm2raw(int nID, float fRpm);
+float calc_time2rpm(float fDeltaAngle, float fTime);
+void move(int nTime_ms, int nDelay);
+void move(int nTime_ms, int nDelay, bool bContinue);
+void move(int nTime_ms, int nDelay, bool bContinue, int nCommandSize, CCommand_t *aCCommands);
+void move_no_wait(int nTime_ms, int nDelay);
+void move_no_wait(int nTime_ms, int nDelay, int nCommandSize, CCommand_t *aCCommands);
+
+void setposition_speed();
+void setposition();
+void sync_clear();
+void sync_push_byte(int nID, int nData);
+void sync_push_word(int nID, int nData);
+void sync_push_dword(int nID, int nData);
+void sync_push_angle(int nID, float fAngle);
+void sync_push(int nID, byte *pbyDatas, int nDataLength);
+void sync_flush(int nAddress);
+void send(int nMotorRealID, int nCommand, int nAddress, const byte *pbyDatas, int nDataLength);
+int updateCRC(byte *data_blk_ptr, int data_blk_size);
+int MakeStuff(byte *pBuff, int nLength);
+
+#define _SIZE_BUFFER 1024
+int m_nClientMotionFd = -1;
+pthread_t m_thSocket = 0;
+int m_nSocketPort = 5000;
+void* Thread_Socket(void* arg);
+
 CCommand_t *ListCmdToArray(list<CCommand_t> lst);
+bool IsStr(const char *strSrc, const char *strFindWord);
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -65,8 +117,24 @@ CCommand_t m_aCCommand[256];
 int m_nCommand = 0;
 #endif
 
+bool m_bWaitSend = true;
 void WaitTime_In_Protocol2(int nMs);
 
+void send_packet(byte *buffer, int nLength);
+void socket_bypass_mode(bool bBypass);
+bool is_socket_bypass_mode();
+bool socket_open(int nPort);
+void sock_close();
+
+
+#ifdef EN_WIRINGPI
+#define _PIN_DIR 1 // gpio18
+#define _PIN_LEVEL_LOW  0
+#define _PIN_LEVEL_HIGH 1
+void PinSetup();
+void PinTxEnable();
+void PinTxDisable();
+#endif
 
 void WaitTime_In_Protocol2(int nMs)
 {
@@ -75,6 +143,44 @@ void WaitTime_In_Protocol2(int nMs)
 	tv.tv_usec = (nMs % 1000) * 1000;
 	select(0, NULL, NULL, NULL, &tv);
 }
+void CProtocol2::Wait(int nTime)
+{
+    if (IsOpen() == false) return;
+    if (m_bEms == true) return;
+
+    CTimer_t CTmr;
+    CTmr.start();
+    
+    int nWait = ((nTime < 0) ? m_nWait_Time : nTime);
+    m_nWait_Time = 0;
+    while (true) { if (CTmr.get() >= nWait) break; WaitTime_In_Protocol2(0); }
+}
+bool IsStr(const char *strSrc, const char *strFindWord)
+{
+    const char *str = strstr(strSrc, strFindWord);
+    if (str == NULL) return false;
+    return true;
+}
+#ifdef EN_WIRINGPI
+void PinSetup()
+{    
+    if (wiringPiSetup () == -1)
+    {
+        printf("Unable to start wiringPi: %s\n", strerror (errno)) ;
+        fprintf (stdout, "Unable to start wiringPi: %s\n", strerror (errno)) ;
+        return;
+    }
+    pinMode(_PIN_DIR, OUTPUT);
+}
+void PinTxEnable()
+{
+    digitalWrite( _PIN_DIR, _PIN_LEVEL_HIGH );// RX Disable
+}
+void PinTxDisable()
+{
+    digitalWrite( _PIN_DIR, _PIN_LEVEL_LOW );// RX Enable
+}
+#endif
 
 int m_nTty = 0;
 CProtocol2::CProtocol2()									// Initialize
@@ -113,12 +219,26 @@ CProtocol2::CProtocol2()									// Initialize
 }
 CProtocol2::~CProtocol2()		 							// Destroy
 {
+    m_bProgEnd = true;
+	usleep(100);				
+	if (IsOpen() == true) Close();
+	if (IsOpen_Socket() == true) Close_Socket();
 }
 
-bool CProtocol2::Open(const char  *pcDevice, int nBaudrate)	//serial port open
+bool CProtocol2::IsOpen() { return is_open(); }
+bool is_open() { return ((m_nTty != 0) ? true : false); }
+bool CProtocol2::Open(const char  *pcDevice, int nBaudrate, bool bWaitSend)// = -1)//, int nMode = 0)	//serial port open // 
 {
     if (IsOpen() == false)
 	{
+        m_bWaitSend = bWaitSend;
+
+#ifdef EN_WIRINGPI     
+        printf("PinSetup()\r\n");
+        PinSetup();
+        PinTxDisable();
+#endif
+
 		// Port Open		
 		struct termios newtio;
 
@@ -166,32 +286,27 @@ bool CProtocol2::Open(const char  *pcDevice, int nBaudrate)	//serial port open
 		newtio.c_cflag |= CS8;
 		newtio.c_cflag |= CLOCAL;
 		newtio.c_cflag |= CREAD;
-        // newtio.c_cflag |= CSTOPB; // 이게 살면 Stop 비트의 수가 2개로, 죽으면 1개로 세팅된다.
-		// newtio.c_iflag = IGNPAR; // 패리티 에러 무시
         newtio.c_oflag = 0;
-		// newtio.c_oflag |= NL0;
-        // newtio.c_oflag |= CR0;
-        // newtio.c_oflag |= TAB0;
-        // newtio.c_oflag |= BS0;
 		newtio.c_lflag = 0;
 		newtio.c_cc[VTIME] = 0;
 		newtio.c_cc[VMIN]  = 0;
 
 
 		tcflush (m_nTty, TCIFLUSH );			//reset modem
-		// tcflush (m_nTty, TCOFLUSH );			//reset modem
 		tcsetattr(m_nTty, TCSANOW, &newtio );	//save setting
-        /*
-        TCSANOW : 속성을 바로 변경한다.
-        TCSADRAIN : 송신을 완료한 후 변경한다.
-        TCSAFLUSH : 송수신 완료 후 변경한다.
-        */
+#ifdef EN_WIRINGPI     
+        printf("PinSetup()\r\n");
+        PinSetup();
+        PinTxDisable();
+#endif
+
 	}
 	if (IsOpen() == false)
 	{
 		printf("[Open()][Error] Connection Fail - Comport %s, %d\r\n", pcDevice, nBaudrate);
 		return false;
 	}
+    
     return true;
 }
 
@@ -205,8 +320,6 @@ void CProtocol2::Close()								//serial port close
 	m_nTty = 0;
 }
 
-//void CProtocol2::SetParam(int nID, bool bDirReverse = false, float fMulti = 1.0f, bool bSetDynamixelPro = false)
-//void CProtocol2::SetParam(int nID, bool bDirReverse)
 void CProtocol2::SetParam(int nID, bool bDirReverse, float fMulti, bool bSetDynamixelPro)
 {
     printf("SetParam(%d, %d, %f, %d)\r\n", nID, bDirReverse?true:false, fMulti, bSetDynamixelPro?true:false);
@@ -216,7 +329,14 @@ void CProtocol2::SetParam(int nID, bool bDirReverse, float fMulti, bool bSetDyna
 }
 
 // Calc ////////////////////////////////////
-float CProtocol2::CalcEvd2Angle(int nID, int nValue)
+float CProtocol2::CalcEvd2Angle(int nID, int nValue) { return calc_evd2angle(nID, nValue); }
+int CProtocol2::CalcAngle2Evd(int nID, float fValue) { return calc_angle2evd(nID, fValue); }
+int CProtocol2::CalcPosition_Time(int nAxis, int nTime, int nDelay, float fAngle) { return calc_position_time(nAxis, nTime, nDelay, fAngle); }
+float CProtocol2::CalcRaw2Rpm(int nID, int nValue) { return calc_raw2rpm(nID, nValue); }
+int CProtocol2::CalcRpm2Raw(int nID, float fRpm) { return calc_rpm2raw(nID, fRpm); }
+float CProtocol2::CalcTime2Rpm(float fDeltaAngle, float fTime) { return calc_time2rpm(fDeltaAngle, fTime); }
+
+float calc_evd2angle(int nID, int nValue)
 {
     float fMul = m_aCParam[nID].m_fMulti * ((m_aCParam[nID].m_bDirReverse == false) ? 1 : -1);
     if (fMul == 0) fMul = 1;
@@ -226,7 +346,7 @@ float CProtocol2::CalcEvd2Angle(int nID, int nValue)
 
     return (((fMechAngle * ((float)nValue - fCenterPos)) / fMechMove) * fMul);
 }
-int CProtocol2::CalcAngle2Evd(int nID, float fValue)
+int calc_angle2evd(int nID, float fValue)
 {
     float fMul = m_aCParam[nID].m_fMulti * ((m_aCParam[nID].m_bDirReverse == false) ? 1 : -1);
     if (fMul == 0) fMul = 1;
@@ -236,14 +356,15 @@ int CProtocol2::CalcAngle2Evd(int nID, float fValue)
     float fMechAngle = m_aCParam[nID].m_fMechAngle;//360.0;
     return (int)Roundf(((fMechMove * fValue) / fMechAngle * fMul + fCenterPos));
 }
-int CProtocol2::CalcPosition_Time(int nAxis, int nTime, int nDelay, float fAngle)
+int calc_position_time(int nAxis, int nTime, int nDelay, float fAngle)
 {
-    float fRpm = (float)abs(CalcTime2Rpm(abs(fAngle - m_afMot_Pose[nAxis]), (float)nTime));
-    return CalcRpm2Raw(nAxis, fRpm);
+    float fRpm = (float)abs(calc_time2rpm(abs(fAngle - m_afMot_Pose[nAxis]), (float)nTime));
+    return calc_rpm2raw(nAxis, fRpm);
 }
-float CProtocol2::CalcRaw2Rpm(int nID, int nValue) { return (float)nValue * m_aCParam[nID].m_fJointRpm; }
-int CProtocol2::CalcRpm2Raw(int nID, float fRpm) { return (int)Roundf(fRpm / m_aCParam[nID].m_fJointRpm); }
-float CProtocol2::CalcTime2Rpm(float fDeltaAngle, float fTime) { return (60.0f * fDeltaAngle * 1000.0f) / (360.0f * fTime); }
+float calc_raw2rpm(int nID, int nValue) { return (float)nValue * m_aCParam[nID].m_fJointRpm; }
+int calc_rpm2raw(int nID, float fRpm) { return (int)Roundf(fRpm / m_aCParam[nID].m_fJointRpm); }
+float calc_time2rpm(float fDeltaAngle, float fTime) { return (60.0f * fDeltaAngle * 1000.0f) / (360.0f * fTime); }
+
 //////////////////////////////////// Calc //
 
 //////////////////////////////////////////////////////
@@ -259,6 +380,12 @@ int m_anCrcTable[] = {
    0x0220, 0x8225, 0x822F, 0x022A, 0x823B, 0x023E, 0x0234, 0x8231, 0x8213, 0x0216, 0x021C, 0x8219, 0x0208, 0x820D, 0x8207, 0x0202};
 void CProtocol2::WaitSend()
 {
+    wait_send();
+}
+void wait_send()
+{
+    if (m_bWaitSend == false) return;
+    // if (m_nControlMode == 1) return;
     int txemptystate;
     while( 1 )
     {
@@ -268,9 +395,15 @@ void CProtocol2::WaitSend()
 }
 void CProtocol2::SendPacket(byte *buffer, int nLength)
 {
-	if (IsOpen() == true)
+	send_packet(buffer, nLength);
+}
+void send_packet(byte *buffer, int nLength)
+{
+	if (is_open() == true)
 	{
-        //PinTxEnable();
+#ifdef EN_WIRINGPI        
+        PinTxEnable();
+#endif
 #if 0
         for (int i = 0; i < nLength; i++)
         {
@@ -278,19 +411,17 @@ void CProtocol2::SendPacket(byte *buffer, int nLength)
             TxWait();
         }
 #else
-        // printf("SendPacket()\r\n");
 	    write(m_nTty, buffer, sizeof(byte) * (nLength));// + 2));
-        // usleep(11000); // 57600
 #endif
-		// TCIFLUSH : 수신되었으나 읽지 않는 데이터를 버린다.
-        // TCOFLUSH : 쓰여졌으나 송신되지 않은 데이터를 버린다.
-        // TCIOFLUSH : 처리되지 않은 송신/수신 데이터를 버린다.
 		
-        tcflush(m_nTty, TCIFLUSH); //usleep(11000);
+        tcflush(m_nTty, TCIFLUSH);
         
-        // WaitSend(); // ttyUSB 일때는 잘 동작
+        wait_send(); // ttyUSB 일때는 잘 동작
         
-        //PinTxDisable();
+
+#ifdef EN_WIRINGPI     
+        PinTxDisable();
+#endif
 #if 0
 		printf("[SendPacket()[%d]]\r\n", nLength);
 		for (int nMsg = 0; nMsg < nLength; nMsg++)
@@ -301,7 +432,8 @@ void CProtocol2::SendPacket(byte *buffer, int nLength)
 #endif
 	}
 }
-void CProtocol2::Send(int nMotorRealID, int nCommand, int nAddress, const byte *pbyDatas, int nDataLength)
+void CProtocol2::Send(int nMotorRealID, int nCommand, int nAddress, const byte *pbyDatas, int nDataLength) { send(nMotorRealID, nCommand, nAddress, pbyDatas, nDataLength); }
+void send(int nMotorRealID, int nCommand, int nAddress, const byte *pbyDatas, int nDataLength)
 {
     int i;
     i = 0;
@@ -329,17 +461,17 @@ void CProtocol2::Send(int nMotorRealID, int nCommand, int nAddress, const byte *
     int nCrc = updateCRC(pbyteBuffer, i - 2);
     pbyteBuffer[i - 2] = (byte)(nCrc & 0xff);
     pbyteBuffer[i - 1] = (byte)((nCrc >> 8) & 0xff);
-    SendPacket(pbyteBuffer, i);
+    send_packet(pbyteBuffer, i);
     free(pbyteBuffer);
 }
 
-int CProtocol2::updateCRC(byte *data_blk_ptr, int data_blk_size)
+int updateCRC(byte *data_blk_ptr, int data_blk_size)
 {
     int nCrc_accum = 0;
     for (int i = 0; i < data_blk_size; i++) nCrc_accum = (nCrc_accum << 8) ^ m_anCrcTable[(((nCrc_accum >> 8) ^ data_blk_ptr[i]) & 0xFF)];
     return nCrc_accum;
 }
-int CProtocol2::MakeStuff(byte *pBuff, int nLength)
+int MakeStuff(byte *pBuff, int nLength)
 {
     int nStuff = 0;
     int nSize = nLength;
@@ -499,7 +631,97 @@ void CProtocol2::Sync_Push(int nID, byte *pbyDatas, int nDataLength)
         #endif
     }
 }
-void CProtocol2::Sync_Flush(int nAddress)
+void CProtocol2::Sync_Flush(int nAddress) { sync_flush(nAddress); }
+
+void sync_clear()
+{
+#ifdef _SYNC_LIST
+    m_lstSync.clear();
+#else
+    m_nSync_ByteSize = 0;
+#endif
+    m_nSync_Length = 0;
+    m_IsSync_Error = false;
+}
+void sync_push_byte(int nID, int nData)
+{
+    byte abyDatas[1];
+    abyDatas[0] = (byte)(nData & 0xff);
+    sync_push(nID, abyDatas, 1);
+}
+void sync_push_word(int nID, int nData)
+{
+    byte abyDatas[2];
+    abyDatas[0] = (byte)(nData & 0xff);
+    abyDatas[1] = (byte)((nData >> 8) & 0xff);
+    sync_push(nID, abyDatas, 2);
+}
+void sync_push_dword(int nID, int nData)
+{
+    byte abyDatas[4];
+    abyDatas[0] = (byte)(nData & 0xff);
+    abyDatas[1] = (byte)((nData >> 8) & 0xff);
+    abyDatas[2] = (byte)((nData >> 16) & 0xff);
+    abyDatas[3] = (byte)((nData >> 24) & 0xff);
+    sync_push(nID, abyDatas, 4);
+}
+void sync_push_angle(int nID, float fAngle)
+{
+    byte abyDatas[4];
+    int nData = calc_angle2evd(nID, fAngle);
+    abyDatas[0] = (byte)(nData & 0xff);
+    abyDatas[1] = (byte)((nData >> 8) & 0xff);
+    abyDatas[2] = (byte)((nData >> 16) & 0xff);
+    abyDatas[3] = (byte)((nData >> 24) & 0xff);
+    sync_push(nID, abyDatas, 4);
+}
+void sync_push(int nID, byte *pbyDatas, int nDataLength)
+{
+    if (nDataLength > 0)
+    {     
+        if (m_nSync_Length == 0)
+        {
+            m_nSync_Length = nDataLength;
+
+            #ifdef _SYNC_LIST
+            m_lstSync.push_back((byte)(nDataLength & 0xff));
+            m_lstSync.push_back((byte)((nDataLength >> 8) & 0xff));
+            #else
+            m_abyteSync[m_nSync_ByteSize++] = (byte)(nDataLength & 0xff);
+            m_abyteSync[m_nSync_ByteSize++] = (byte)((nDataLength >> 8) & 0xff);
+            #endif
+        }
+        else if (m_nSync_Length != nDataLength)
+        {
+            printf("Error(sync_push) - ID:%d\r\n",nID);
+            m_IsSync_Error = true;
+            return;
+        }
+
+        #ifdef _SYNC_LIST
+        m_lstSync.push_back((byte)(nID & 0xff));
+        for (int i = 0; i < nDataLength; i++)
+        {
+            m_lstSync.push_back((byte)pbyDatas[i]);
+        }
+        #else
+        m_abyteSync[m_nSync_ByteSize++] = (byte)(nID & 0xff);
+        for (int i = 0; i < nDataLength; i++)
+        {
+            m_abyteSync[m_nSync_ByteSize++] = (byte)pbyDatas[i];
+        }
+        #if 0
+        printf("m_nSync_ByteSize=%d\r\n", m_nSync_ByteSize);
+        for (int i = 0; i < m_nSync_ByteSize; i++)
+        {
+            printf("%d ", m_abyteSync[i]);
+        }
+        printf("\r\n");
+        #endif
+        #endif
+    }
+}
+void sync_flush(int nAddress)
 {
     if (m_IsSync_Error == false)
     {
@@ -521,19 +743,22 @@ void CProtocol2::Sync_Flush(int nAddress)
         #else
         if (m_nSync_ByteSize > 0)
         {
-            Send(254, 0x83, nAddress, m_abyteSync, m_nSync_ByteSize);
+            send(254, 0x83, nAddress, m_abyteSync, m_nSync_ByteSize);
         }
         #endif
     }
-    Sync_Clear();
+    sync_clear();
 }
+
+
+
 ////////////////////////////////////////////////////// => Sync Write
 
 //////////////////////////////////////////////////////
 // Read
 //////////////////////////////////////////////////////
-const int _WAIT_TIME = 1000; // ms
-int m_nShowReturnPacket = 0;//1;//0; // 테스트... 나중에 0 으로 기본값 줄 것
+const int _WAIT_TIME = 500; // ms
+int m_nShowReturnPacket = 0;
 void CProtocol2::ShowPacketReturn(int nPacket_0_Disable_1_Enable) { m_nShowReturnPacket = nPacket_0_Disable_1_Enable; }
 class CReceive_t{
 public:
@@ -558,6 +783,10 @@ bool CProtocol2::WaitReceive()
         int nSize = read(m_nTty, buf, 256);
         if (nSize > 0)
         {
+            if (is_socket_bypass_mode() == true)
+            {
+                if (m_nClientMotionFd >= 0) write(m_nClientMotionFd, buf, _SIZE_BUFFER);
+            }
             ReceivedPacket(buf, nSize);
             if (m_nRequestMotors <= 0) 
             {
@@ -567,7 +796,7 @@ bool CProtocol2::WaitReceive()
         }
         if (CTmr.get() >= _WAIT_TIME)
         {
-            printf("대기시간 초과\r\n");
+            printf("Timeover > %d\r\n", _WAIT_TIME);
             break;
         }
         WaitTime_In_Protocol2(1);
@@ -599,18 +828,12 @@ void CProtocol2::ReceivedPacket(byte *buffer, int nBufferSize)
         {
             if ((val >= 0x20) && (val <= 127))
             {
-                // ojw5014
-                //strLetter.append((char)(val));
             }
             else{
-                // ojw5014
-                //strLetter.append"(0x" + ("0" + Ojw.CConvert.IntToHex(16, 2)) + ")";
             }
         }
         if (bShow_Str)
         {
-            // ojw5014
-            //str += " 0x" + ("0" + Ojw.CConvert.IntToHex(16, 2)) + ",";
         }
         byte byData = val;
         int nTmp = m_nReceive_Header % 100;
@@ -709,62 +932,57 @@ void CProtocol2::ReceivedPacket(byte *buffer, int nBufferSize)
                         int nSize = m_anReceive_Datas.size();
                         byte pbyData[nSize];
 
-                        //if (m_nReceived_Policy == 1) // m_anMot 변수에 모터의 각도값을 즉각 반영
-                        //{
-                            if (m_nRequestMotors > 0)
+                        if (m_nRequestMotors > 0)
+                        {
+                            if ((m_nReceive_ID >= 0) && (m_nReceive_ID < 253))
                             {
-                                if ((m_nReceive_ID >= 0) && (m_nReceive_ID < 253))
-                                {
-                                    
-                                    std::list<int>::iterator iter; // 반복만을 위한 변수 생성
-                                    int nBuffer = 0;
-                                    int nCnt = m_anReceive_Datas.size();
-                                    for (int i = 0; i < nCnt; i++)
-                                    { 
-                                        pbyData[nBuffer++] = (byte)(m_anReceive_Datas.front() & 0xff);
-                                        m_anReceive_Datas.pop_front();
-                                    }
-    
-                                    int nVal = 0;
-                                    switch (CReceive.nLength_Data)
-                                    {
-                                        case 1: nVal = (byte)(pbyData[0]); break;
-                                        case 2: nVal = BytesToShort(pbyData, 0); break;
-                                        case 4: nVal = BytesToInt(pbyData, 0); break;
-                                    }
-
-                                    if (m_nRequest_Address == m_aCParam[m_nReceive_ID].m_nSet_Position_Address)
-                                    {
-                                        m_anMot[m_nReceive_ID] = nVal;
-                                        m_afMot[m_nReceive_ID] = CalcEvd2Angle(CReceive.nID, nVal);
-                                        printf("[Receive]Set:%d번 -> %d(%.2f)도)\r\n", m_nReceive_ID, nVal, m_afMot[m_nReceive_ID]);
-                                    }
-                                    else if (m_nRequest_Address == m_aCParam[m_nReceive_ID].m_nGet_Position_Address)
-                                    {
-                                        m_anMot_Pose[m_nReceive_ID] = nVal;
-                                        m_afMot_Pose[m_nReceive_ID] = CalcEvd2Angle(CReceive.nID, nVal);
-
-                                        m_anMot[m_nReceive_ID] = m_anMot_Pose[m_nReceive_ID];
-                                        m_afMot[m_nReceive_ID] = m_afMot_Pose[m_nReceive_ID];
-                                        printf("[Receive]Get:%d번 -> %d(%.2f도)\r\n", m_nReceive_ID, nVal, m_afMot[m_nReceive_ID]);
-                                    }
-                                    else if (m_nRequest_Address == m_aCParam[m_nReceive_ID].m_nSet_Torq_Address)
-                                    {
-                                        m_abMot[m_nReceive_ID] = ((nVal == 0) ? false:true);
-                                    }
+                                
+                                std::list<int>::iterator iter; // 반복만을 위한 변수 생성
+                                int nBuffer = 0;
+                                int nCnt = m_anReceive_Datas.size();
+                                for (int i = 0; i < nCnt; i++)
+                                { 
+                                    pbyData[nBuffer++] = (byte)(m_anReceive_Datas.front() & 0xff);
+                                    m_anReceive_Datas.pop_front();
                                 }
-                                m_nRequestMotors--;
-                                if (m_nRequestMotors <= 0)
+
+                                int nVal = 0;
+                                switch (CReceive.nLength_Data)
                                 {
-                                    
+                                    case 1: nVal = (byte)(pbyData[0]); break;
+                                    case 2: nVal = BytesToShort(pbyData, 0); break;
+                                    case 4: nVal = BytesToInt(pbyData, 0); break;
+                                }
+
+                                if (m_nRequest_Address == m_aCParam[m_nReceive_ID].m_nSet_Position_Address)
+                                {
+                                    m_anMot[m_nReceive_ID] = nVal;
+                                    m_afMot[m_nReceive_ID] = CalcEvd2Angle(CReceive.nID, nVal);
+                                    printf("[Receive]Set:%d번 -> %d(%.2f)도)\r\n", m_nReceive_ID, nVal, m_afMot[m_nReceive_ID]);
+                                }
+                                else if (m_nRequest_Address == m_aCParam[m_nReceive_ID].m_nGet_Position_Address)
+                                {
+                                    m_anMot_Pose[m_nReceive_ID] = nVal;
+                                    m_afMot_Pose[m_nReceive_ID] = CalcEvd2Angle(CReceive.nID, nVal);
+
+                                    m_anMot[m_nReceive_ID] = m_anMot_Pose[m_nReceive_ID];
+                                    m_afMot[m_nReceive_ID] = m_afMot_Pose[m_nReceive_ID];
+                                    printf("[Receive]Get:%d번 -> %d(%.2f도)\r\n", m_nReceive_ID, nVal, m_afMot[m_nReceive_ID]);
+                                }
+                                else if (m_nRequest_Address == m_aCParam[m_nReceive_ID].m_nSet_Torq_Address)
+                                {
+                                    m_abMot[m_nReceive_ID] = ((nVal == 0) ? false:true);
                                 }
                             }
-                            else
+                            m_nRequestMotors--;
+                            if (m_nRequestMotors <= 0)
                             {
-                                //m_nSeq_Motors++;
-                                //m_nReceived_Policy = 0;
+                                
                             }
-                        //}
+                        }
+                        else
+                        {
+                        }
                         CReceive.nError = m_nReceive_Error;
                         for (int i = 0; i < nSize; i++)
                         {
@@ -965,15 +1183,16 @@ void CProtocol2::Command_Clear() { m_lstCmdIDs.clear(); }
 void CProtocol2::Command_Set(int nID, float fValue) { CCommand_t CCmd(nID, fValue); m_lstCmdIDs.push_back(CCmd); }
 void CProtocol2::Command_Set_Rpm(int nID, float fRpm) { CCommand_t CCmd(nID, CalcRpm2Raw(nID, fRpm)); m_lstCmdIDs.push_back(CCmd); }
 #else
-void CProtocol2::Command_Clear() { m_nCommand = 0; }
-void CProtocol2::Command_Set(int nID, float fValue) { m_aCCommand[m_nCommand].nID = nID; m_aCCommand[m_nCommand].fVal = fValue; m_nCommand++; }
-void CProtocol2::Command_Set_Rpm(int nID, float fRpm) { m_aCCommand[m_nCommand].nID = nID; m_aCCommand[m_nCommand].fVal = CalcRpm2Raw(nID, fRpm); m_nCommand++; }
+void CProtocol2::Command_Clear() { command_clear(); }
+void CProtocol2::Command_Set(int nID, float fValue) { command_set(nID, fValue); }
+void CProtocol2::Command_Set_Rpm(int nID, float fRpm) { command_set_rpm(nID, fRpm); }
 #endif
 
+float CProtocol2::Get(int nID) { return m_afMot[nID]; }
 
-bool m_bEms = false; // emergency switch
-bool IsEms() { return m_bEms; }
-void Reset() { m_bEms = false; }
+void command_clear() { m_nCommand = 0; }
+void command_set(int nID, float fValue) { m_aCCommand[m_nCommand].nID = nID; m_aCCommand[m_nCommand].fVal = fValue; m_nCommand++; }
+void command_set_rpm(int nID, float fRpm) { m_aCCommand[m_nCommand].nID = nID; m_aCCommand[m_nCommand].fVal = calc_rpm2raw(nID, fRpm); m_nCommand++; }
 
 void CProtocol2::SetTorq()
 {
@@ -1086,7 +1305,7 @@ void CProtocol2::FThread_Run()
             m_bBreak = false;
             while (true)
             {
-                if ((m_bEms == true) || (m_bBreak == true))
+                if ((IsEms() == true) || (m_bBreak == true))
                 {
                     if (m_bBreak == true) m_bBreak = false;
                     for (int i = 0; i < CCmd.Length; i++) { m_afMot_Pose[CCmd[i].nID] = m_afMot[CCmd[i].nID] = afRes[CCmd[i].nID]; }
@@ -1198,7 +1417,7 @@ void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue) { list<CCommand_
 void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue, list<CCommand_t> aCCommands)
 {
     if (IsOpen() == false) return;
-    if (m_bEms == true) return;
+    if (IsEms() == true) return;
 
     CTimer_t CTmr;
     CTmr.start();
@@ -1221,7 +1440,7 @@ void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue, list<CCommand_t>
         memcpy(afMot, m_afMot, sizeof(float) * nSize);
         while (true)
         {
-            if (m_bEms == true)
+            if (IsEms() == true)
             {
                 for (int i = 0; i < nCnt_Motors; i++) { m_afMot_Pose[pCCmd[i].nID] = m_afMot[pCCmd[i].nID] = afRes[pCCmd[i].nID]; }
                 return;
@@ -1255,7 +1474,7 @@ void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue, list<CCommand_t>
 void CProtocol2::Wheel(float fRpm)
 {
     if (IsOpen() == false) return;
-    if (m_bEms == true) return;
+    if (IsEms() == true) return;
     
     int nSize = m_lstCmdIDs.size();
     CCommand_t *pCCmd = ((m_lstCmdIDs.size() > 0) ? ListCmdToArray(m_lstCmdIDs) : NULL);
@@ -1398,13 +1617,19 @@ CCommand_t *ListCmdToArray(list<CCommand_t> lst)
 }
 
 #else
+
 // 마지막 모션이 아니라면 bContinue = false
-void CProtocol2::Move(int nTime_ms, int nDelay) { Move(nTime_ms, nDelay, false, 0, NULL); }
-void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue) { Move(nTime_ms, nDelay, bContinue, 0, NULL); }
-void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue, int nCommandSize, CCommand_t *aCCommands)
+void CProtocol2::Move(int nTime_ms, int nDelay) { move(nTime_ms, nDelay, false, 0, NULL); }
+void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue) { move(nTime_ms, nDelay, bContinue, 0, NULL); }
+void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue, int nCommandSize, CCommand_t *aCCommands) { move(nTime_ms, nDelay, bContinue, nCommandSize, aCCommands); }
+
+void move(int nTime_ms, int nDelay) { move(nTime_ms, nDelay, false, 0, NULL); }
+void move(int nTime_ms, int nDelay, bool bContinue) { move(nTime_ms, nDelay, bContinue, 0, NULL); }
+void move(int nTime_ms, int nDelay, bool bContinue, int nCommandSize, CCommand_t *aCCommands)
 {
-    if (IsOpen() == false) return;
-    if (m_bEms == true) return;
+    m_nWait_Time = 0;
+    if (is_open() == false) return;
+    if (IsEms() == true) return;
 
     CTimer_t CTmr;
     CTmr.start();
@@ -1415,7 +1640,7 @@ void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue, int nCommandSize
     CCommand_t *pCCmd = (CCommand_t *)malloc(sizeof(CCommand_t) * nCnt_Motors);
     memcpy(pCCmd, pCCmd2, sizeof(CCommand_t) * nCnt_Motors);
     
-    Command_Clear();
+    command_clear();
     
     if (nCnt_Motors > 0)
     {
@@ -1438,23 +1663,23 @@ void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue, int nCommandSize
                 if (fTmr_Sub >= 1.0f) break;
             }
 
-            Command_Clear();
+            command_clear();
             for (int j = 0; j < nCnt_Motors; j++) { 
-                Command_Set(pCCmd[j].nID, 0);
+                command_set(pCCmd[j].nID, 0);
             }
-            SetPosition_Speed();
+            setposition_speed();
             
-            Command_Clear();
+            command_clear();
             for (int i = 0; i < nCnt_Motors; i++) { 
                 afRes[pCCmd[i].nID] = afMot[pCCmd[i].nID] + (pCCmd[i].fVal - afMot[pCCmd[i].nID]) * fTmr; 
-                Command_Set(pCCmd[i].nID, afRes[pCCmd[i].nID]); 
+                command_set(pCCmd[i].nID, afRes[pCCmd[i].nID]); 
             }
-            if (m_bEms == true)
+            if (IsEms() == true)
             {
                 free(pCCmd);
                 return;
             }
-            SetPosition();
+            setposition();
 
             if (fTmr >= 1.0f) break;
             WaitTime_In_Protocol2(10);
@@ -1469,13 +1694,14 @@ void CProtocol2::Move(int nTime_ms, int nDelay, bool bContinue, int nCommandSize
 }
 
 void CProtocol2::Move_NoWait(int nTime_ms, int nDelay) { Move_NoWait(nTime_ms, nDelay, 0, NULL); }
-void CProtocol2::Move_NoWait(int nTime_ms, int nDelay, int nCommandSize, CCommand_t *aCCommands)
+void CProtocol2::Move_NoWait(int nTime_ms, int nDelay, int nCommandSize, CCommand_t *aCCommands) { move_no_wait(nTime_ms, nDelay, nCommandSize, aCCommands); }
+void move_no_wait(int nTime_ms, int nDelay) { move_no_wait(nTime_ms, nDelay, 0, NULL); }
+void move_no_wait(int nTime_ms, int nDelay, int nCommandSize, CCommand_t *aCCommands)
 {
-    if (IsOpen() == false) return;
-    if (m_bEms == true) return;
+    if (is_open() == false) return;
+    if (IsEms() == true) return;
 
-    CTimer_t CTmr;
-    CTmr.start();
+    m_nWait_Time = (nTime_ms + nDelay);
 
     int nCnt_Motors = ((m_nCommand > 0) ? m_nCommand : nCommandSize);
     if (m_nCommand > 0) nCnt_Motors = m_nCommand;
@@ -1483,30 +1709,30 @@ void CProtocol2::Move_NoWait(int nTime_ms, int nDelay, int nCommandSize, CComman
     CCommand_t *pCCmd = (CCommand_t *)malloc(sizeof(CCommand_t) * nCnt_Motors);
     memcpy(pCCmd, pCCmd2, sizeof(CCommand_t) * nCnt_Motors);
     
-    Command_Clear();
+    command_clear();
     
     if (nCnt_Motors > 0)
     {
         int nSize = sizeof(m_afMot) / sizeof(float);  
         float afMot[nSize];
         memcpy(afMot, m_afMot, sizeof(float) * nSize);
-        Command_Clear();
+        command_clear();
         
         for (int j = 0; j < nCnt_Motors; j++) { 
-            Command_Set(pCCmd[j].nID, CalcPosition_Time(pCCmd[j].nID, nTime_ms, nDelay, pCCmd[j].fVal));
+            command_set(pCCmd[j].nID, calc_position_time(pCCmd[j].nID, nTime_ms, nDelay, pCCmd[j].fVal));
         }
-        SetPosition_Speed();
+        setposition_speed();
         
-        Command_Clear();
+        command_clear();
         for (int i = 0; i < nCnt_Motors; i++) { 
-            Command_Set(pCCmd[i].nID, pCCmd[i].fVal); 
+            command_set(pCCmd[i].nID, pCCmd[i].fVal); 
         }
-        if (m_bEms == true)
+        if (IsEms() == true)
         {
             free(pCCmd);
             return;
         }
-        SetPosition();
+        setposition();
 
     }
     free(pCCmd);
@@ -1515,7 +1741,7 @@ void CProtocol2::Move_NoWait(int nTime_ms, int nDelay, int nCommandSize, CComman
 void CProtocol2::Wheel(float fRpm)
 {
     if (IsOpen() == false) return;
-    if (m_bEms == true) return;
+    if (IsEms() == true) return;
     
     int nSize = m_nCommand;
     
@@ -1575,13 +1801,14 @@ void CProtocol2::SetSpeed()
     }
 }
 
-void CProtocol2::SetPosition_Speed()
+void CProtocol2::SetPosition_Speed() { setposition_speed(); }
+void setposition_speed()
 {
     CCommand_t aCSecond[256];
     int nSecond = 0;
     while (true)
     {
-        Sync_Clear();
+        sync_clear();
         int nSize = m_nCommand;
         CCommand_t *pCCmd2 = ((m_nCommand > 0) ? m_aCCommand : NULL);
         if (nSecond > 0)
@@ -1606,24 +1833,25 @@ void CProtocol2::SetPosition_Speed()
                 }
                 else
                 {
-                    Sync_Push_Dword(pCCmd[i].nID, (int)Roundf(pCCmd[i].fVal));
+                    sync_push_dword(pCCmd[i].nID, (int)Roundf(pCCmd[i].fVal));
                 }
             }
-            Sync_Flush(m_aCParam[pCCmd[0].nID].m_nSet_Position_Speed_Address);
+            sync_flush(m_aCParam[pCCmd[0].nID].m_nSet_Position_Speed_Address);
         }
         free(pCCmd);
         if (nSecond == 0) break;
     }
-    Command_Clear();
+    command_clear();
 }
 
-void CProtocol2::SetPosition()
+void CProtocol2::SetPosition() { setposition(); }
+void setposition()
 {
     CCommand_t aCSecond[256];
     int nSecond = 0;
     while (true)
     {
-        Sync_Clear();
+        sync_clear();
         int nSize = m_nCommand;
         CCommand_t *pCCmd2 = ((m_nCommand > 0) ? m_aCCommand : NULL);
         if (nSecond > 0)
@@ -1650,15 +1878,15 @@ void CProtocol2::SetPosition()
                 {
                     m_afMot[pCCmd[i].nID] = pCCmd[i].fVal;
                     m_afMot_Pose[pCCmd[i].nID] = pCCmd[i].fVal;
-                    Sync_Push_Dword(pCCmd[i].nID, CalcAngle2Evd(pCCmd[i].nID, pCCmd[i].fVal));
+                    sync_push_dword(pCCmd[i].nID, calc_angle2evd(pCCmd[i].nID, pCCmd[i].fVal));
                 }
             }
-            Sync_Flush(m_aCParam[pCCmd[0].nID].m_nSet_Position_Address);
+            sync_flush(m_aCParam[pCCmd[0].nID].m_nSet_Position_Address);
         }
         free(pCCmd);
         if (nSecond == 0) break;
     }
-    Command_Clear();
+    command_clear();
 }
 ////////////////////////////////////////////////////// => Command
 #endif
@@ -1695,15 +1923,20 @@ bool CProtocol2::Play(const char *strMotionFile)
         fgets(buff, 1024, pfileMotion);
         
         nSize_Line = strlen(buff);
+        printf("nSize_Line = %d\r\n", nSize_Line);
         lSize -= nSize_Line;
-        if (lSize < 2)
+        if (nSize_Line > 0)
+        {
+            if (PlayFrameString(buff) == true)
+            {
+                nCnt_Frame++;
+                printf("[%d]%s\r\n", nCnt_Frame, buff);
+            }
+        }
+        if (lSize <= 2)//2)
         {
             break;
         } 
-        
-        if (PlayFrameString(buff) == true)
-            nCnt_Frame++;
-        
         memset(buff, 0, nSize_Line);
 	}
     printf("Done : Frame=%d\r\n", nCnt_Frame);
@@ -1712,8 +1945,9 @@ bool CProtocol2::Play(const char *strMotionFile)
     return bFileOpened;
 }
 
-bool CProtocol2::PlayFrameString(char *buff) { return PlayFrameString(buff, false); }
-bool CProtocol2::PlayFrameString(char *buff, bool bNoWait)
+bool CProtocol2::PlayFrameString(const char *buff) { return PlayFrameString(buff, false); }
+bool CProtocol2::PlayFrameString(const char *buff, bool bNoWait) { return play_frame_string(buff, bNoWait); }
+bool play_frame_string(const char *buff, bool bNoWait)
 {
     int nTime = 0;
     int nDelay = 0;
@@ -1721,20 +1955,21 @@ bool CProtocol2::PlayFrameString(char *buff, bool bNoWait)
     int nCol = 0;
     char strSplit0[] = ",";
     char strSplit1[] = ":";
-
-    char *ptr = strtok(((nCol == 0)?buff : NULL), strSplit0);
+    char strBuff[256];
+    sprintf(strBuff, buff);
+    char *ptr = (char *)strtok(((nCol == 0)?strBuff : NULL), strSplit0);
     int nLen = strlen(ptr);
     bool bEn = false;
     if (nLen > 1)
     {
-        if ((buff[1] == '1') || (buff[1] == '2')) // Enable
+        if ((strBuff[1] == '1') || (strBuff[1] == '2')) // Enable
         {
             bool bAngle = false;
-            if (buff[1] == '2') bAngle = true;
+            if (strBuff[1] == '2') bAngle = true;
             bEn = true;
             int nTime = 0;
             int nDelay = 0;
-            Command_Clear();
+            command_clear();
             while(ptr=strtok(NULL, strSplit0))
             {
                 bool bEnd = false;
@@ -1780,9 +2015,9 @@ bool CProtocol2::PlayFrameString(char *buff, bool bNoWait)
                             int nID = atoi(pcID);
                             if (bAngle) 
                             {
-                                Command_Set(nID, atof(pcEvd));
+                                command_set(nID, atof(pcEvd));
                             }
-                            else Command_Set(nID, CalcEvd2Angle(nID, atoi(pcEvd)));
+                            else command_set(nID, calc_evd2angle(nID, atoi(pcEvd)));
 
 
                             free(pcID);
@@ -1794,10 +2029,10 @@ bool CProtocol2::PlayFrameString(char *buff, bool bNoWait)
             }
             if (bEn == true) 
             {
-                if (bNoWait == false) Move(nTime, nDelay);
+                if (bNoWait == false) move(nTime, nDelay);
                 else 
                 {
-                    Move_NoWait(nTime, nDelay);
+                    move_no_wait(nTime, nDelay);
                 }
             }
 
@@ -1806,4 +2041,182 @@ bool CProtocol2::PlayFrameString(char *buff, bool bNoWait)
         }
     }
     return false;
+}
+
+
+////////////////////////////////////////////////////////////////
+int m_nSocket_Mode = 0; // 0 : Normal Mode, 1 : Bypass Mode
+void CProtocol2::Socket_BypassMode(bool bBypass) { socket_bypass_mode(bBypass); }
+bool CProtocol2::IsSocket_BypassMode() { return is_socket_bypass_mode(); }
+bool CProtocol2::Open_Socket(int nPort)//const char * pcIp)//, int nPort)
+{
+	return socket_open(nPort);
+}
+
+void socket_bypass_mode(bool bBypass) 
+{
+    m_nSocket_Mode = (bBypass) ? 1 : 0;
+}
+bool is_socket_bypass_mode() { return (m_nSocket_Mode == 1) ? true : false; }
+bool socket_open(int nPort)//const char * pcIp)//, int nPort)
+{
+	// Thread
+    if (nPort > 0) m_nSocketPort = nPort;
+	int nRet = pthread_create(&m_thSocket, NULL, Thread_Socket, NULL);
+	if (nRet != 0)
+	{
+		printf("[Protocol2]Thread(Socket) Init Error\r\n");
+		return false;
+	}
+	printf("[Protocol2]Init Thread(Socket)\r\n");	
+    return true;
+}
+
+void CProtocol2::Close_Socket()
+{
+	sock_close();
+}
+
+bool CProtocol2::IsOpen_Socket()
+{
+	return ((m_nClientMotionFd >= 0) ? true : false);
+}
+
+void sock_close()
+{
+    printf("[Protocol2]Close Socket\n");
+	close(m_nClientMotionFd);
+	m_nClientMotionFd = -1;
+}
+
+#define _SIZE_QUE 3
+#define _SIZE_QUE_LENGTH 100
+int m_nQue_Index_Next = 0;
+int m_nQue_Index = 0;
+int m_nQue_Count = 0;
+unsigned char m_abyteQue[_SIZE_QUE][_SIZE_QUE_LENGTH];
+void* Thread_Socket(void* arg)
+{
+	// Socket	
+	int nSize;
+	unsigned char buf[256];
+	int nSockFd;
+	int nPort = m_nSocketPort;
+	struct sockaddr_in SServerAddr, SClientAddr;
+	printf("[Protocol2]Server Started, nPort=%d\n", nPort);
+	nSockFd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (nSockFd < 0)
+	{
+		printf("[Protocol2]Socket Error\n");
+		exit(-1);
+	}
+	
+    memset(&SServerAddr, 0, sizeof(SServerAddr));
+	SServerAddr.sin_family = AF_INET;
+	SServerAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+	SServerAddr.sin_port = htons(nPort);
+
+	int nLength_Client;
+	if (bind(nSockFd, (struct sockaddr *)&SServerAddr, sizeof(SServerAddr)) < 0)
+    {
+		printf("Socket Bind() Error\r\n");
+        exit(-1);
+    }
+	
+    // 연결 대기열 1개 생성
+    if (listen(nSockFd, 1) < 0)
+    {
+        printf("Socket listen() Error\r\n");
+		exit(-1);
+    }
+	
+	while(m_bProgEnd == false)
+	{
+        printf("[Protocol2]Wait Client Connection\n");	
+		
+        nLength_Client = sizeof(m_nClientMotionFd);    // connection socket
+		m_nClientMotionFd = accept(nSockFd, (struct sockaddr *)&SClientAddr, (socklen_t*)&nLength_Client);
+        printf("m_nClientMotionFd=%d\r\n", m_nClientMotionFd);
+		if (m_nClientMotionFd < 0)
+		{
+			printf("[Protocol2]Client Connection Error\n");
+			break;
+		}
+		printf("[Protocol2]Client Connected\r\n");
+
+		while ((m_nClientMotionFd >= 0) && (m_bProgEnd == false))
+		{	
+			if ((nSize = read(m_nClientMotionFd, buf, _SIZE_BUFFER)) < 0)
+			{		
+				printf("[Protocol2]Receive Error\n");
+				sock_close();
+				break;
+			}
+			if (nSize <= 0)
+			{
+				printf("[Protocol2]Disconnected\n");
+				sock_close();
+				break;
+			}			
+			else
+			{			
+                if (is_socket_bypass_mode() == true)	
+				    send_packet(buf, nSize);
+                else
+                {
+                    bool bStart = false;
+                    bool bContinue = false;
+                    //int nSize = 0;
+                    int nSize2 = m_abyteQue[m_nQue_Index_Next][0] + m_abyteQue[m_nQue_Index_Next][1] * 256;
+                    if (nSize2 < 0) nSize2 = 0;
+                    else if (nSize2 > _SIZE_QUE_LENGTH) nSize2 = _SIZE_QUE_LENGTH;
+                    for (int i = 0; i < nSize; i++)
+                    {
+                        if (buf[i] == 0x02)
+                        {
+                            bStart = true;
+                            nSize2 = 0;
+                            bContinue = false;
+                        }
+                        else if (buf[i] == 0x03)
+                        {
+                            bStart = false;
+                            bContinue = true;
+                            m_abyteQue[m_nQue_Index_Next][0] = (nSize2 & 0xff);
+                            m_abyteQue[m_nQue_Index_Next][1] = ((nSize2 >> 8) & 0xff);
+                            m_nQue_Index = m_nQue_Index_Next;
+                            m_nQue_Index_Next++;
+                            m_nQue_Count++;
+                        }
+                        else
+                        {
+                            m_abyteQue[m_nQue_Index_Next][2 + nSize2++] = buf[i];
+                        }
+                    }
+                    if (m_nQue_Index_Next >= _SIZE_QUE)
+                    {
+                        m_nQue_Index_Next = 0;
+                    }
+                    if (m_nQue_Count > _SIZE_QUE)
+                    {
+                        m_nQue_Count = _SIZE_QUE;
+                    }
+                }
+			}
+            if (m_nQue_Count > 0)
+            {
+                int nLen = m_abyteQue[m_nQue_Index][0] + m_abyteQue[m_nQue_Index][1] * 256;
+                    
+                char str[nLen + 1];
+                memset(str, 0, sizeof(char) * (nLen + 1));
+                memcpy(str, &m_abyteQue[m_nQue_Index][2], sizeof(char) * nLen);
+                
+                play_frame_string(str, true);
+            }
+			usleep(0);
+		}
+		usleep(0);
+	}
+	printf("[Protocol2][Thread] Closed Thread\r\n");
+    return (void *)NULL;
 }
