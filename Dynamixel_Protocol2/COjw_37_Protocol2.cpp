@@ -319,14 +319,10 @@ void CProtocol2::Close()								//serial port close
 	}
 	m_nTty = 0;
 }
-
-void CProtocol2::SetParam(int nID, bool bDirReverse, float fMulti, bool bSetDynamixelPro)
-{
-    printf("SetParam(%d, %d, %f, %d)\r\n", nID, bDirReverse?true:false, fMulti, bSetDynamixelPro?true:false);
-    m_aCParam[nID].SetParam(bSetDynamixelPro);
-    m_aCParam[nID].m_bDirReverse = bDirReverse;
-    m_aCParam[nID].m_fMulti = fMulti;
-}
+void    CProtocol2::SetParam(int nID, bool bDirReverse, float fMulti, bool bSetDynamixelPro) { printf("SetParam(%d, %d, %f, %d)\r\n", nID, bDirReverse?true:false, fMulti, bSetDynamixelPro?true:false); m_aCParam[nID].SetParam(bSetDynamixelPro); m_aCParam[nID].m_bDirReverse = bDirReverse; m_aCParam[nID].m_fMulti = fMulti; }
+void    CProtocol2::SetParam_Dir(int nID, bool bDirReverse) { printf("SetParam_Dir(%d, %d)\r\n", nID, bDirReverse?true:false); m_aCParam[nID].m_bDirReverse = bDirReverse; }
+void    CProtocol2::SetParam_DynamixelPro(int nID, bool bSetDynamixelPro) { printf("SetParam_DynamixelPro(%d, %d)\r\n", nID, bSetDynamixelPro?true:false); m_aCParam[nID].SetParam(bSetDynamixelPro); }
+void    CProtocol2::SetParam_Multi(int nID, float fMulti) { printf("SetParam_Multi(%d, %f)\r\n", nID, fMulti); m_aCParam[nID].m_fMulti = fMulti; }
 
 // Calc ////////////////////////////////////
 float CProtocol2::CalcEvd2Angle(int nID, int nValue) { return calc_evd2angle(nID, nValue); }
@@ -553,6 +549,16 @@ void CProtocol2::Sync_Clear()
     m_nSync_Length = 0;
     m_IsSync_Error = false;
 }
+void CProtocol2::Write(int nID, int nAddress, int nSize, int nValue)
+{
+    byte abyDatas[nSize];
+    for (int i = 0; i < nSize; i++) abyDatas[i] = (byte)((nValue >> (8 * i)) & 0xff);
+    Send(nID, 0x03, nAddress, abyDatas, nSize);
+}
+void CProtocol2::Write_Byte(int nID, int nAddress, int nValue) { Write(nID, nAddress, 1, nValue); }
+void CProtocol2::Write_Word(int nID, int nAddress, int nValue) { Write(nID, nAddress, 2, nValue); }
+void CProtocol2::Write_DWord(int nID, int nAddress, int nValue) { Write(nID, nAddress, 4, nValue); }
+
 void CProtocol2::Sync_Push_Byte(int nID, int nData)
 {
     byte abyDatas[1];
@@ -1891,7 +1897,7 @@ void setposition()
 ////////////////////////////////////////////////////// => Command
 #endif
 
-bool CProtocol2::Play(const char *strMotionFile)
+bool CProtocol2::Play(const char *strMotionFile, bool bOneshot_Style)
 {
     if (IsOpen() == false) return false;
     printf("Play - %s\r\n", strMotionFile);
@@ -1927,10 +1933,22 @@ bool CProtocol2::Play(const char *strMotionFile)
         lSize -= nSize_Line;
         if (nSize_Line > 0)
         {
-            if (PlayFrameString(buff) == true)
+            
+            if (bOneshot_Style)
             {
-                nCnt_Frame++;
-                printf("[%d]%s\r\n", nCnt_Frame, buff);
+                if (PlayFrameString(buff, true) == true)
+                {
+                    Wait();
+                    nCnt_Frame++;
+                }
+            }
+            else
+            {
+                if (PlayFrameString(buff) == true)
+                {
+                    nCnt_Frame++;
+                    printf("[%d]%s\r\n", nCnt_Frame, buff);
+                }
             }
         }
         if (lSize <= 2)//2)
@@ -2129,7 +2147,6 @@ void* Thread_Socket(void* arg)
         printf("Socket listen() Error\r\n");
 		exit(-1);
     }
-	
 	while(m_bProgEnd == false)
 	{
         printf("[Protocol2]Wait Client Connection\n");	
@@ -2159,7 +2176,7 @@ void* Thread_Socket(void* arg)
 				break;
 			}			
 			else
-			{			
+			{
                 if (is_socket_bypass_mode() == true)	
 				    send_packet(buf, nSize);
                 else
@@ -2212,6 +2229,7 @@ void* Thread_Socket(void* arg)
                 memcpy(str, &m_abyteQue[m_nQue_Index][2], sizeof(char) * nLen);
                 
                 play_frame_string(str, true);
+                m_nQue_Count--;
             }
 			usleep(0);
 		}
@@ -2220,3 +2238,4 @@ void* Thread_Socket(void* arg)
 	printf("[Protocol2][Thread] Closed Thread\r\n");
     return (void *)NULL;
 }
+

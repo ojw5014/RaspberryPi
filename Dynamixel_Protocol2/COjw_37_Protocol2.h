@@ -88,7 +88,10 @@ public:
 
     // void SetParam(int nID, bool bDirReverse = false);
     void    SetParam(int nID, bool bDirReverse = false, float fMulti = 1.0f, bool bSetDynamixelPro = false);
-    
+    void    SetParam_Dir(int nID, bool bDirReverse = false);
+    void    SetParam_DynamixelPro(int nID, bool bSetDynamixelPro = false);
+    void    SetParam_Multi(int nID, float fMulti = 1.0f);
+
     void    Command_Clear();
     void    Command_Set(int nID, float fValue);
     void    Command_Set_Rpm(int nID, float fRpm);
@@ -113,7 +116,11 @@ public:
     //void Send(int nMotorRealID, int nCommand, int nAddress, const byte *pbyDatas, ...);
     void Send(int nMotorRealID, int nCommand, int nAddress, const byte *pbyDatas, int nDataLength);
     ////////////////////////////////////////////////////// => Protocol
-    
+    void Write(int nID, int nAddress, int nSize, int nValue);
+    void Write_Byte(int nID, int nAddress, int nValue);
+    void Write_Word(int nID, int nAddress, int nValue);
+    void Write_DWord(int nID, int nAddress, int nValue);
+
     //////////////////////////////////////////////////////
     // Sync Write
     //////////////////////////////////////////////////////
@@ -194,7 +201,7 @@ public:
     void SetPosition_Speed();
     void SetPosition();
  
-    bool Play(const char *strMotionFile);
+    bool Play(const char *strMotionFile, bool bOneshot_Style = false);
     bool PlayFrameString(const char *buff);
     bool PlayFrameString(const char *buff, bool bNoWait);
 

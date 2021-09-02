@@ -6,6 +6,8 @@ int main(int argc, char* argv[]) {
     {
         if (m_CCom.Open("/dev/ttyUSB0", 1000000) == true) // USB
         {
+            m_CCom.SetParam(2, false, 1.0f, true);
+            
             // test motors -> 1, 2
             int nTorqOn = 1;
             m_CCom.Set(1, nTorqOn);

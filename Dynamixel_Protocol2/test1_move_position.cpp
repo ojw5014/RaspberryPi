@@ -29,13 +29,13 @@ int main(int argc, char* argv[]) {
             int nMovingTime = 3000; // 3 seconds (3초)
             m_CCom.Set(1, fAngle);
             m_CCom.Set(2, fAngle);
-            m_CCom.Move_NoWait(nMovingTime);
+            m_CCom.Move_NoWait(nMovingTime, 0);
             m_CCom.Wait();
 
             fAngle = 0.0f;
             m_CCom.Set(1, fAngle);
             m_CCom.Set(2, fAngle);
-            m_CCom.Move_NoWait(nMovingTime);
+            m_CCom.Move_NoWait(nMovingTime, 0);
             m_CCom.Wait();
 
 
@@ -54,7 +54,7 @@ int main(int argc, char* argv[]) {
             m_CCom.PlayFrameString("s2,5000,0,1:-90,2:-90,3:-30,4:-30");
             m_CCom.PlayFrameString("s2,1000,0,1:0,2:0,3:0,4:0");
             #endif
-            m_CCom.Play("testmotion.txt", true);
+            m_CCom.Play("motion.txt");
         }
     }
     if (m_CCom.IsOpen() == true)
