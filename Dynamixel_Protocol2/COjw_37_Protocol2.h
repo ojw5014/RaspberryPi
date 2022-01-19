@@ -85,6 +85,9 @@ public:
     bool    IsOpen();
     bool    Open(const char  *pcDevice, int nBaudrate, bool bWaitSend = true);
     void    Close();
+    
+    void    Ems();
+    void    Reboot(int nMotor = 254);
 
     // void SetParam(int nID, bool bDirReverse = false);
     void    SetParam(int nID, bool bDirReverse = false, float fMulti = 1.0f, bool bSetDynamixelPro = false);
@@ -210,6 +213,7 @@ public:
     bool IsOpen_Socket();
     void Socket_BypassMode(bool bBypass);
     bool IsSocket_BypassMode();
+
     //void* Thread_Socket(void* arg);
     //
     // void SetTest(CCommand_t aCCmds, ...);

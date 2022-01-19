@@ -56,6 +56,10 @@ bool m_bEms = false; // emergency switch
 bool m_bProgEnd = false;
 bool IsEms() { return (((m_bEms == true) || (m_bProgEnd == true)) ? true : false); }
 void Reset() { m_bEms = false; }
+
+void ems();
+void reboot(int nMotor = 254);
+
 bool is_open();
 void wait_send();
 bool play_frame_string(const char *buff, bool bNoWait);
@@ -74,6 +78,9 @@ void move(int nTime_ms, int nDelay, bool bContinue, int nCommandSize, CCommand_t
 void move_no_wait(int nTime_ms, int nDelay);
 void move_no_wait(int nTime_ms, int nDelay, int nCommandSize, CCommand_t *aCCommands);
 
+void set_speed();
+
+
 void setposition_speed();
 void setposition();
 void sync_clear();
@@ -84,6 +91,8 @@ void sync_push_angle(int nID, float fAngle);
 void sync_push(int nID, byte *pbyDatas, int nDataLength);
 void sync_flush(int nAddress);
 void send(int nMotorRealID, int nCommand, int nAddress, const byte *pbyDatas, int nDataLength);
+void send_command(int nID, int nCommand);
+void send_byte(int nID, int nAddress, int nData);
 int updateCRC(byte *data_blk_ptr, int data_blk_size);
 int MakeStuff(byte *pBuff, int nLength);
 
@@ -319,6 +328,25 @@ void CProtocol2::Close()								//serial port close
 	}
 	m_nTty = 0;
 }
+
+void CProtocol2::Ems() { ems(); }
+void CProtocol2::Reboot(int nMotor) { reboot(nMotor); }
+void ems()
+{
+    m_bEms = true;
+    send_byte(254, 64, 0);
+    send_byte(254, 512, 0);
+
+    send_byte(254, 64, 1);
+    send_byte(254, 512, 1);
+}
+void reboot(int nMotor)
+{
+    if (nMotor == 254) { for (int i = 0; i < 256; i++) { m_abMot[i] = false; } }
+    else { m_abMot[nMotor] = false; }
+    send_command(nMotor, 0x08);
+}
+
 void    CProtocol2::SetParam(int nID, bool bDirReverse, float fMulti, bool bSetDynamixelPro) { printf("SetParam(%d, %d, %f, %d)\r\n", nID, bDirReverse?true:false, fMulti, bSetDynamixelPro?true:false); m_aCParam[nID].SetParam(bSetDynamixelPro); m_aCParam[nID].m_bDirReverse = bDirReverse; m_aCParam[nID].m_fMulti = fMulti; }
 void    CProtocol2::SetParam_Dir(int nID, bool bDirReverse) { printf("SetParam_Dir(%d, %d)\r\n", nID, bDirReverse?true:false); m_aCParam[nID].m_bDirReverse = bDirReverse; }
 void    CProtocol2::SetParam_DynamixelPro(int nID, bool bSetDynamixelPro) { printf("SetParam_DynamixelPro(%d, %d)\r\n", nID, bSetDynamixelPro?true:false); m_aCParam[nID].SetParam(bSetDynamixelPro); }
@@ -459,6 +487,13 @@ void send(int nMotorRealID, int nCommand, int nAddress, const byte *pbyDatas, in
     pbyteBuffer[i - 1] = (byte)((nCrc >> 8) & 0xff);
     send_packet(pbyteBuffer, i);
     free(pbyteBuffer);
+}
+void send_command(int nID, int nCommand) { send(nID, nCommand, 0, NULL, 0); }
+void send_byte(int nID, int nAddress, int nData)
+{
+    byte abyDatas[1];
+    abyDatas[0] = (byte)(nData & 0xff);
+    send(nID, 0x03, 0, abyDatas, 1);
 }
 
 int updateCRC(byte *data_blk_ptr, int data_blk_size)
@@ -1501,10 +1536,10 @@ void CProtocol2::SetSpeed()
     list<CCommand_t> lstSecond;
     while (true)
     {
-        Sync_Clear();
+        sync_clear();
         int nSize = m_lstCmdIDs.size();
         CCommand_t *pCCmd = ((m_lstCmdIDs.size() > 0) ? ListCmdToArray(m_lstCmdIDs) : NULL);
-        Command_Clear();
+        command_clear();
         if (lstSecond.size() > 0)
         {
             nSize = lstSecond.size();
@@ -1522,10 +1557,10 @@ void CProtocol2::SetSpeed()
                 }
                 else
                 {
-                    Sync_Push_Dword(pCCmd[i].nID, (int)Round(pCCmd[i].fVal));
+                    sync_push_dword(pCCmd[i].nID, (int)Round(pCCmd[i].fVal));
                 }
             }
-            Sync_Flush(m_aCParam[pCCmd[0].nID].m_nSet_Speed_Address);
+            sync_flush(m_aCParam[pCCmd[0].nID].m_nSet_Speed_Address);
         }
         if (lstSecond.size() == 0) break;
     }
@@ -1764,13 +1799,14 @@ void CProtocol2::Wheel(float fRpm)
     free(pCCmd);
 }
 
-void CProtocol2::SetSpeed()
+void CProtocol2::SetSpeed() { set_speed(); }
+void set_speed()
 {
     CCommand_t aCSecond[256];
     int nSecond = 0;
     while (true)
     {
-        Sync_Clear();
+        sync_clear();
         int nSize = m_nCommand;
         CCommand_t *pCCmd2 = ((m_nCommand > 0) ? m_aCCommand : NULL);
         if (nSecond > 0)
@@ -1783,24 +1819,25 @@ void CProtocol2::SetSpeed()
         CCommand_t *pCCmd = (CCommand_t *)malloc(sizeof(CCommand_t) * nSize);
         memcpy(pCCmd, pCCmd2, sizeof(CCommand_t) * nSize);
         
-        Command_Clear();
+        command_clear();
         if (pCCmd == NULL) break;
         if (nSize > 0)
         {
             for (int i = 0; i < nSize; i++)
             {
+                float fMul = m_aCParam[pCCmd[i].nID].m_fMulti * ((m_aCParam[pCCmd[i].nID].m_bDirReverse == false) ? 1 : -1);
                 if (m_aCParam[pCCmd[0].nID].m_nSet_Speed_Address != m_aCParam[pCCmd[i].nID].m_nSet_Speed_Address)
                 {
                     aCSecond[nSecond].nID = pCCmd[i].nID;
-                    aCSecond[nSecond].fVal = pCCmd[i].fVal;
+                    aCSecond[nSecond].fVal = pCCmd[i].fVal * fMul;
                     nSecond++;
                 }
                 else
                 {
-                    Sync_Push_Dword(pCCmd[i].nID, (int)Round(pCCmd[i].fVal));
+                    sync_push_dword(pCCmd[i].nID, (int)Round(pCCmd[i].fVal * fMul));
                 }
             }
-            Sync_Flush(m_aCParam[pCCmd[0].nID].m_nSet_Speed_Address);
+            sync_flush(m_aCParam[pCCmd[0].nID].m_nSet_Speed_Address);
         }
         free(pCCmd);
         if (nSecond == 0) break;
@@ -1978,16 +2015,25 @@ bool play_frame_string(const char *buff, bool bNoWait)
     char *ptr = (char *)strtok(((nCol == 0)?strBuff : NULL), strSplit0);
     int nLen = strlen(ptr);
     bool bEn = false;
+    bool bWheel = false;
     if (nLen > 1)
     {
-        if ((strBuff[1] == '1') || (strBuff[1] == '2')) // Enable
+        if (
+            ((strBuff[1] == '1') || (strBuff[1] == '2')) // Enable 
+            ||
+            ((strBuff[1] == '3') || (strBuff[1] == '4')) // Enable
+        )
         {
             bool bAngle = false;
+            bool bWheel_Rpm = false;
+            if ((strBuff[1] == '3') || (strBuff[1] == '4')) bWheel = true;
             if (strBuff[1] == '2') bAngle = true;
+            if (strBuff[1] == '4') bWheel_Rpm = true;
             bEn = true;
             int nTime = 0;
             int nDelay = 0;
             command_clear();
+
             while(ptr=strtok(NULL, strSplit0))
             {
                 bool bEnd = false;
@@ -2031,12 +2077,17 @@ bool play_frame_string(const char *buff, bool bNoWait)
                             memcpy(pcEvd, ptr + nIndex + 1, nLenEvd);
                      
                             int nID = atoi(pcID);
-                            if (bAngle) 
+                            
+                            if ((bAngle) || (bWheel_Rpm))
                             {
-                                command_set(nID, atof(pcEvd));
+                                if (bWheel_Rpm) command_set_rpm(nID, atof(pcEvd));
+                                else command_set(nID, atof(pcEvd));
                             }
-                            else command_set(nID, calc_evd2angle(nID, atoi(pcEvd)));
-
+                            else 
+                            {
+                                if (bWheel) command_set(nID, calc_raw2rpm(nID, atoi(pcEvd)));
+                                else command_set(nID, calc_evd2angle(nID, atoi(pcEvd)));
+                            }
 
                             free(pcID);
                             free(pcEvd);
@@ -2047,10 +2098,17 @@ bool play_frame_string(const char *buff, bool bNoWait)
             }
             if (bEn == true) 
             {
-                if (bNoWait == false) move(nTime, nDelay);
-                else 
+                if (bWheel)
                 {
-                    move_no_wait(nTime, nDelay);
+                    set_speed();
+                }
+                else
+                {
+                    if (bNoWait == false) move(nTime, nDelay);
+                    else 
+                    {
+                        move_no_wait(nTime, nDelay);
+                    }
                 }
             }
 
