@@ -6,9 +6,9 @@ int main(int argc, char* argv[]) {
     {
         if (m_CCom.Open("/dev/ttyUSB0", 1000000) == true) // USB
         {
-            // 2번과 4번 모터는 방향을 반대로(Direction -> Backward)
+            // 모터의 방향을 반대로(Direction -> Backward)
             bool bDir_Inverse = false;
-            bool bDynamixel_Pro = true;
+            bool bDynamixel_Pro = false;
             
             // m_CCom.SetParam(1, false, 1.0f, false); // 기본설정이라 굳이 하지 않아도 된다.(default setting)
             m_CCom.SetParam(2, bDir_Inverse, 1.0f, bDynamixel_Pro); // 맨 뒤의 false 를 true 로 바꿔주면 Dynamixel Pro 제어

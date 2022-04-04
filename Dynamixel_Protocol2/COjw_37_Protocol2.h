@@ -16,8 +16,6 @@ example )   sudo g++ -o test test.cpp COjw_37_Protocol2.cpp COjw_37_Protocol2.h 
 #include <unistd.h>
 #include  <pthread.h>
 
-#include <sys/timeb.h>
-
 //#define _CMD_LIST
 
 #ifdef _CMD_LIST
@@ -345,7 +343,8 @@ public:
   int get_hour() { time_t tmrTime = time( NULL ); struct tm* tmrData = localtime( &tmrTime ); return tmrData->tm_hour; }
   int get_minute() { time_t tmrTime = time( NULL ); struct tm* tmrData = localtime( &tmrTime ); return tmrData->tm_min; }
   int get_second() { time_t tmrTime = time( NULL ); struct tm* tmrData = localtime( &tmrTime ); return tmrData->tm_sec; }
-  int get_millisecond() { struct timeb time; ftime(&time);localtime( &time.time ); return time.millitm; }
+  //int get_millisecond() { struct timeb time; ftime(&time);localtime( &time.time ); return time.millitm; }
+  int get_millisecond() { struct timeval tv; if(gettimeofday(&tv, 0) < 0) { } return (int)(tv.tv_usec * 1000); }
 };
 #define BytesToShort(buf, nStartIndex) ((buf[nStartIndex + 1] << 8) | buf[nStartIndex + 0])
 #define BytesToInt(buf, nStartIndex) ((buf[nStartIndex + 3] << 24) | (buf[nStartIndex + 2] << 16) | (buf[nStartIndex + 1] << 8) | buf[nStartIndex + 0])
